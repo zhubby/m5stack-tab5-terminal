@@ -5,6 +5,7 @@ Near-real-time A-share/HK stock monitor for M5Stack Tab5.
 ## Architecture
 
 - `backend/`: Rust + Axum quote relay.
+- `frontend/`: Vite + React + TypeScript browser admin UI.
 - `firmware/`: ESP-IDF C++ firmware for M5Stack Tab5 using LVGL.
 - Quote source: mock by default, Longbridge OpenAPI when configured.
 - Device protocol: WebSocket JSON stream from `/v1/quotes/stream`.
@@ -17,10 +18,9 @@ The Tab5 firmware never stores Longbridge credentials. It only connects to the b
 cargo run -p tab5-stock-backend
 ```
 
-Default mode is mock quotes bound to `127.0.0.1:8080`. Useful endpoints:
+Default mode is mock quotes bound to `127.0.0.1:8080`. API routes stay available even when the frontend has not been built. Useful endpoints:
 
 ```text
-GET http://localhost:8080/
 WS  ws://localhost:8080/v1/quotes/stream
 GET http://localhost:8080/v1/health
 GET http://localhost:8080/v1/watchlist
@@ -29,7 +29,30 @@ POST http://localhost:8080/v1/admin/watchlist
 DELETE http://localhost:8080/v1/admin/watchlist/<symbol>
 ```
 
-Open `http://localhost:8080/` to manage the watchlist from a browser. Admin API calls require `DEVICE_TOKEN`; add/delete operations update `WATCHLIST_FILE` and restart the active quote provider subscription.
+Admin API calls require `DEVICE_TOKEN`; add/delete operations update `WATCHLIST_FILE` and restart the active quote provider subscription.
+
+## Frontend quick start
+
+For browser UI development, run the backend and Vite separately:
+
+```bash
+cd frontend
+npm install
+VITE_BACKEND_ORIGIN=http://127.0.0.1:8080 npm run dev
+```
+
+Open `http://localhost:5173/admin`. The Vite dev server proxies `/v1/*` and WebSocket traffic to the backend. Enter the same `DEVICE_TOKEN` used by the backend.
+
+For single-service production deployment:
+
+```bash
+cd frontend
+npm run build
+cd ..
+cargo run -p tab5-stock-backend
+```
+
+Axum serves `/`, `/admin`, and static assets from `FRONTEND_DIST_DIR` which defaults to `frontend/dist`. If `frontend/dist/index.html` is missing, page routes return an explicit frontend-not-built response while `/v1/*` continues to hit the backend API.
 
 Use Longbridge by setting:
 
@@ -98,6 +121,15 @@ Backend:
 
 ```bash
 cargo test -p tab5-stock-backend
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm test
+npm run lint
+npm run build
 ```
 
 Firmware requires an ESP-IDF environment and Tab5 hardware for final validation.

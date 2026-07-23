@@ -4,14 +4,18 @@ use axum::{
         Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, header},
-    response::{Html, IntoResponse},
-    routing::{delete, get},
+    http::{HeaderMap, StatusCode, header},
+    response::IntoResponse,
+    routing::{any, delete, get},
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use serde::Deserialize;
 use tokio::time::{Duration, MissedTickBehavior, interval, sleep};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    cors::CorsLayer,
+    services::{ServeDir, ServeFile},
+    trace::TraceLayer,
+};
 use tracing::{error, info};
 
 use crate::{
@@ -22,26 +26,38 @@ use crate::{
     state::AppState,
 };
 
-const ADMIN_HTML: &str = include_str!("admin.html");
-
 pub fn app(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(admin_page))
-        .route("/admin", get(admin_page))
-        .route("/v1/health", get(health))
-        .route("/v1/watchlist", get(watchlist))
-        .route(
-            "/v1/admin/watchlist",
-            get(admin_watchlist).post(admin_upsert_watch_item),
+    let frontend_dist_dir = state.config().frontend_dist_dir.clone();
+    let router = Router::new()
+        .route("/v1/", any(api_not_found))
+        .nest("/v1", api_routes());
+    let router = if frontend_dist_dir.join("index.html").is_file() {
+        router.fallback_service(
+            ServeDir::new(&frontend_dist_dir)
+                .fallback(ServeFile::new(frontend_dist_dir.join("index.html"))),
         )
-        .route(
-            "/v1/admin/watchlist/{symbol}",
-            delete(admin_delete_watch_item),
-        )
-        .route("/v1/quotes/stream", get(quotes_stream))
+    } else {
+        router.fallback(frontend_not_built)
+    };
+
+    router
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+fn api_routes() -> Router<AppState> {
+    Router::new()
+        .route("/health", get(health))
+        .route("/watchlist", get(watchlist))
+        .route(
+            "/admin/watchlist",
+            get(admin_watchlist).post(admin_upsert_watch_item),
+        )
+        .route("/admin/watchlist/{symbol}", delete(admin_delete_watch_item))
+        .route("/quotes/stream", get(quotes_stream))
+        .route("/", any(api_not_found))
+        .route("/{*path}", any(api_not_found))
 }
 
 pub fn spawn_provider(state: AppState) -> tokio::task::JoinHandle<()> {
@@ -91,8 +107,16 @@ pub fn spawn_provider(state: AppState) -> tokio::task::JoinHandle<()> {
     })
 }
 
-async fn admin_page() -> Html<&'static str> {
-    Html(ADMIN_HTML)
+async fn api_not_found() -> impl IntoResponse {
+    StatusCode::NOT_FOUND
+}
+
+async fn frontend_not_built() -> impl IntoResponse {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "frontend dist is not built; run `npm run build` in frontend/ or set FRONTEND_DIST_DIR",
+    )
 }
 
 async fn health(

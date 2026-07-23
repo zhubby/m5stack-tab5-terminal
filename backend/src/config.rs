@@ -42,6 +42,7 @@ pub struct AppConfig {
     pub provider: QuoteProviderKind,
     pub initial_watchlist: Vec<WatchItem>,
     pub watchlist_file: Option<PathBuf>,
+    pub frontend_dist_dir: PathBuf,
     pub stale_after: Duration,
     pub mock_interval: Duration,
     pub device_token: Option<String>,
@@ -104,6 +105,12 @@ impl AppConfig {
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .or_else(|| Some(PathBuf::from("watchlist.json")));
+        let frontend_dist_dir = env::var("FRONTEND_DIST_DIR")
+            .map(|value| value.trim().to_string())
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("frontend/dist"));
         let env_watchlist = parse_watchlist(&env::var("WATCHLIST").unwrap_or_default())?;
         let watchlist = load_or_default_watchlist(watchlist_file.as_deref(), env_watchlist)?;
         let device_token = env::var("DEVICE_TOKEN")
@@ -116,6 +123,7 @@ impl AppConfig {
             provider,
             initial_watchlist: watchlist,
             watchlist_file,
+            frontend_dist_dir,
             stale_after,
             mock_interval,
             device_token,

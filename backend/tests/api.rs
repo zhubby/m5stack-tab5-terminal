@@ -27,6 +27,7 @@ fn test_config() -> AppConfig {
             WatchItem::new("00700.HK", "腾讯控股", Market::Hk),
         ],
         watchlist_file: None,
+        frontend_dist_dir: temp_frontend_dist_path("missing"),
         stale_after: std::time::Duration::from_secs(20),
         mock_interval: std::time::Duration::from_millis(25),
         device_token: None,
@@ -440,11 +441,22 @@ async fn admin_rejects_invalid_symbols() {
 }
 
 #[tokio::test]
-async fn admin_page_is_served() {
-    let state = AppState::new(test_config());
+async fn frontend_dist_serves_root_and_admin_fallback() {
+    let dist = temp_frontend_dist_path("dist");
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(
+        dist.join("index.html"),
+        r#"<!doctype html><html><body><div id="root">React Admin</div></body></html>"#,
+    )
+    .unwrap();
+
+    let mut config = test_config();
+    config.frontend_dist_dir = dist.clone();
+    let state = AppState::new(config);
     let app = app(state);
 
     let response = app
+        .clone()
         .oneshot(
             axum::http::Request::builder()
                 .uri("/")
@@ -460,7 +472,114 @@ async fn admin_page_is_served() {
         .unwrap()
         .to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
-    assert!(html.contains("Tab5 股票终端"));
+    assert!(html.contains("React Admin"));
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/admin")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(html.contains("React Admin"));
+    fs::remove_dir_all(dist).unwrap();
+}
+
+#[tokio::test]
+async fn api_routes_are_not_intercepted_by_frontend_fallback() {
+    let dist = temp_frontend_dist_path("api-fallback");
+    fs::create_dir_all(&dist).unwrap();
+    fs::write(dist.join("index.html"), "React Admin").unwrap();
+
+    let mut config = test_config();
+    config.frontend_dist_dir = dist.clone();
+    let state = AppState::new(config);
+    let app = app(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/not-found")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(!body.contains("React Admin"));
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(!body.contains("React Admin"));
+    fs::remove_dir_all(dist).unwrap();
+}
+
+#[tokio::test]
+async fn missing_frontend_dist_keeps_api_available() {
+    let mut config = test_config();
+    config.frontend_dist_dir = temp_frontend_dist_path("missing-dist");
+    let state = AppState::new(config);
+    let app = app(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/health")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/admin")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("frontend dist is not built"));
 }
 
 #[tokio::test]
@@ -559,6 +678,14 @@ fn temp_watchlist_path(label: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("tab5-stock-api-{label}-{unique}.json"))
+}
+
+fn temp_frontend_dist_path(label: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("tab5-stock-frontend-{label}-{unique}"))
 }
 
 async fn serve_test_app(
