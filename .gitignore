@@ -1,0 +1,10 @@
+target/
+.env
+.env.*
+!.env.example
+sdkconfig
+sdkconfig.old
+managed_components/
+build/
+.DS_Store
+

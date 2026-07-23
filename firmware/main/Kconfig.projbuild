@@ -1,0 +1,32 @@
+menu "Tab5 Stock Terminal"
+
+config TAB5_STOCK_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+    help
+        Wi-Fi SSID for the Tab5 terminal. Leave empty to run UI mock mode.
+
+config TAB5_STOCK_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+    help
+        Wi-Fi password. Leave empty when the access point is open.
+
+config TAB5_STOCK_BACKEND_URI
+    string "Backend WebSocket URI"
+    default "ws://192.168.1.10:8080/v1/quotes/stream"
+    help
+        Axum backend WebSocket endpoint.
+
+config TAB5_STOCK_DEVICE_TOKEN
+    string "Backend device token"
+    default ""
+    help
+        Optional token appended to the WebSocket URI as ?token=... when the backend requires DEVICE_TOKEN.
+
+config TAB5_STOCK_UI_REFRESH_MS
+    int "UI refresh throttle in milliseconds"
+    default 500
+    range 200 5000
+
+endmenu
