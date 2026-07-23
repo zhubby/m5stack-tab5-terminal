@@ -4,14 +4,14 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use longbridge::{
     Config, QuoteContext,
-    quote::{PushEventDetail, SubFlags},
+    quote::{PushEventDetail, SubFlags, TradeSessions},
 };
 use rust_decimal::prelude::ToPrimitive;
 
 use crate::{
     config::WatchItem,
     error::AppError,
-    models::{Quote, QuoteStatus},
+    models::{IntradayPoint, Quote, QuoteStatus},
     providers::QuoteProvider,
     state::AppState,
 };
@@ -75,6 +75,10 @@ impl QuoteProvider for LongbridgeQuoteProvider {
                             snapshot.last_done.to_f64(),
                             snapshot.prev_close.to_f64(),
                         ),
+                        open: snapshot.open.to_f64().unwrap_or_default(),
+                        high: snapshot.high.to_f64().unwrap_or_default(),
+                        low: snapshot.low.to_f64().unwrap_or_default(),
+                        prev_close: snapshot.prev_close.to_f64().unwrap_or_default(),
                         volume: snapshot.volume.max(0) as u64,
                         turnover: snapshot.turnover.to_f64().unwrap_or_default(),
                         trade_status,
@@ -128,6 +132,10 @@ impl QuoteProvider for LongbridgeQuoteProvider {
                                             last,
                                             change: last - prev_close,
                                             change_pct: pct_change(Some(last), Some(prev_close)),
+                                            open: push.open.to_f64().unwrap_or_default(),
+                                            high: push.high.to_f64().unwrap_or_default(),
+                                            low: push.low.to_f64().unwrap_or_default(),
+                                            prev_close,
                                             volume: push.volume.max(0) as u64,
                                             turnover: push.turnover.to_f64().unwrap_or_default(),
                                             trade_status,
@@ -149,6 +157,27 @@ impl QuoteProvider for LongbridgeQuoteProvider {
             }
         }
     }
+}
+
+pub async fn fetch_intraday(item: &WatchItem) -> Result<Vec<IntradayPoint>, AppError> {
+    let config =
+        Arc::new(Config::from_apikey_env().map_err(|err| AppError::provider(err.to_string()))?);
+    let (ctx, _) = QuoteContext::new(config);
+    let lines = ctx
+        .intraday(item.provider_symbol.clone(), TradeSessions::Intraday)
+        .await
+        .map_err(|err| AppError::provider(err.to_string()))?;
+
+    Ok(lines
+        .into_iter()
+        .map(|line| IntradayPoint {
+            ts: chrono_from_time(line.timestamp),
+            price: line.price.to_f64().unwrap_or_default(),
+            avg_price: line.avg_price.to_f64().unwrap_or_default(),
+            volume: line.volume.max(0) as u64,
+            turnover: line.turnover.to_f64().unwrap_or_default(),
+        })
+        .collect())
 }
 
 fn quote_status_from_trade_status(status: &str) -> QuoteStatus {

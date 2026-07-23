@@ -7,7 +7,7 @@ use std::{
 
 use axum::http::StatusCode;
 use chrono::Utc;
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use tab5_stock_backend::{
     AppConfig, AppState, Market, QuoteProviderKind, StreamMessage, WatchItem, WatchlistResponse,
     app, providers::mock::mock_quote, spawn_provider,
@@ -29,6 +29,7 @@ fn test_config() -> AppConfig {
         watchlist_file: None,
         frontend_dist_dir: temp_frontend_dist_path("missing"),
         stale_after: std::time::Duration::from_secs(20),
+        detail_cache_ttl: std::time::Duration::from_secs(30),
         mock_interval: std::time::Duration::from_millis(25),
         device_token: None,
     }
@@ -416,6 +417,87 @@ async fn quotes_for_deleted_symbols_are_ignored() {
 }
 
 #[tokio::test]
+async fn quote_detail_returns_mock_intraday_for_watchlist_symbol() {
+    let state = AppState::new(test_config());
+    let item = state.watchlist().await[0].clone();
+    state
+        .upsert_quote(mock_quote(
+            &item,
+            0,
+            1,
+            state.config().stale_after.as_millis() as u64,
+        ))
+        .await;
+    let app = app(state);
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/quotes/600519.SH/detail")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(payload["symbol"], "600519.SH");
+    assert_eq!(payload["cached"], false);
+    assert!(payload["quote"]["open"].is_number());
+    assert!(payload["quote"]["high"].is_number());
+    assert!(payload["quote"]["low"].is_number());
+    assert!(payload["quote"]["prev_close"].is_number());
+    assert!(payload["intraday"].as_array().unwrap().len() >= 60);
+    assert!(payload["intraday"][0]["price"].is_number());
+    assert!(payload["intraday"][0]["avg_price"].is_number());
+}
+
+#[tokio::test]
+async fn quote_detail_rejects_non_watchlist_symbol() {
+    let state = AppState::new(test_config());
+    let app = app(state);
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/v1/quotes/09988.HK/detail")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn quote_detail_uses_short_intraday_cache() {
+    let state = AppState::new(test_config());
+    let item = state.watchlist().await[0].clone();
+    state
+        .upsert_quote(mock_quote(
+            &item,
+            0,
+            1,
+            state.config().stale_after.as_millis() as u64,
+        ))
+        .await;
+
+    let first = state.quote_detail("600519.SH").await.unwrap();
+    let second = state.quote_detail("600519.SH").await.unwrap();
+
+    assert!(!first.cached);
+    assert!(second.cached);
+    assert_eq!(first.intraday, second.intraday);
+}
+
+#[tokio::test]
 async fn admin_rejects_invalid_symbols() {
     let mut config = test_config();
     config.device_token = Some("secret".to_string());
@@ -635,6 +717,72 @@ async fn websocket_sends_snapshot_and_quote_updates() {
 }
 
 #[tokio::test]
+async fn websocket_detail_request_returns_detail_message() {
+    let state = AppState::new(test_config());
+    let item = state.watchlist().await[0].clone();
+    state
+        .upsert_quote(mock_quote(
+            &item,
+            0,
+            1,
+            state.config().stale_after.as_millis() as u64,
+        ))
+        .await;
+    let (addr, server_shutdown, server_handle) = serve_test_app(state.clone()).await;
+
+    let (mut socket, _) = timeout(
+        Duration::from_secs(2),
+        connect_async(format!("ws://{addr}/v1/quotes/stream")),
+    )
+    .await
+    .expect("websocket connect timed out")
+    .unwrap();
+
+    let _snapshot = timeout(Duration::from_secs(2), socket.next())
+        .await
+        .expect("snapshot timed out")
+        .unwrap()
+        .unwrap();
+    socket
+        .send(Message::Text(
+            r#"{"type":"detail_request","request_id":7,"symbol":"600519.SH"}"#.into(),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_detail = false;
+    for _ in 0..10 {
+        let next = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("detail response timed out")
+            .unwrap()
+            .unwrap();
+        if let Message::Text(text) = next {
+            let message: StreamMessage = serde_json::from_str(&text).unwrap();
+            if let StreamMessage::Detail {
+                request_id,
+                symbol,
+                intraday,
+                ..
+            } = message
+            {
+                assert_eq!(request_id, 7);
+                assert_eq!(symbol, "600519.SH");
+                assert!(!intraday.is_empty());
+                saw_detail = true;
+                break;
+            }
+        }
+    }
+
+    drop(socket);
+    state.shutdown();
+    let _ = server_shutdown.send(());
+    server_handle.abort();
+    assert!(saw_detail, "expected detail message");
+}
+
+#[tokio::test]
 async fn quote_message_json_has_firmware_contract_fields() {
     let state = AppState::new(test_config());
     let item = state.watchlist().await[0].clone();
@@ -649,6 +797,10 @@ async fn quote_message_json_has_firmware_contract_fields() {
     assert_eq!(quote["status"], "normal");
     assert!(quote.get("last").unwrap().is_number());
     assert!(quote.get("change_pct").unwrap().is_number());
+    assert!(quote.get("open").unwrap().is_number());
+    assert!(quote.get("high").unwrap().is_number());
+    assert!(quote.get("low").unwrap().is_number());
+    assert!(quote.get("prev_close").unwrap().is_number());
     assert!(quote.get("quote_ts").unwrap().is_string());
     assert!(quote.get("server_ts").unwrap().is_string());
     assert!(quote.get("stale_after_ms").unwrap().is_number());

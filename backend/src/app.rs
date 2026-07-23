@@ -10,6 +10,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use serde::Deserialize;
+use tokio::sync::mpsc;
 use tokio::time::{Duration, MissedTickBehavior, interval, sleep};
 use tower_http::{
     cors::CorsLayer,
@@ -21,7 +22,10 @@ use tracing::{error, info};
 use crate::{
     config::QuoteProviderKind,
     error::AppError,
-    models::{DeleteWatchItemResponse, StreamMessage, UpsertWatchItemRequest, WatchlistResponse},
+    models::{
+        DeleteWatchItemResponse, QuoteDetailResponse, StreamMessage, StreamRequest,
+        UpsertWatchItemRequest, WatchlistResponse,
+    },
     providers::{QuoteProvider, longbridge::LongbridgeQuoteProvider, mock::MockQuoteProvider},
     state::AppState,
 };
@@ -56,6 +60,7 @@ fn api_routes() -> Router<AppState> {
         )
         .route("/admin/watchlist/{symbol}", delete(admin_delete_watch_item))
         .route("/quotes/stream", get(quotes_stream))
+        .route("/quotes/{symbol}/detail", get(quote_detail))
         .route("/", any(api_not_found))
         .route("/{*path}", any(api_not_found))
 }
@@ -165,6 +170,15 @@ async fn admin_delete_watch_item(
     Ok(Json(DeleteWatchItemResponse { deleted, items }))
 }
 
+async fn quote_detail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(symbol): Path<String>,
+) -> Result<Json<QuoteDetailResponse>, AppError> {
+    authorize(&state, &headers, None)?;
+    Ok(Json(state.quote_detail(&symbol).await?))
+}
+
 async fn quotes_stream(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -178,6 +192,7 @@ async fn quotes_stream(
 async fn handle_socket(state: AppState, socket: WebSocket) {
     let (mut sender, mut receiver) = socket.split();
     let mut quote_rx = state.subscribe();
+    let (detail_tx, mut detail_rx) = mpsc::channel::<StreamMessage>(8);
     let snapshot = StreamMessage::Snapshot {
         quotes: state.snapshot().await,
     };
@@ -197,6 +212,9 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
                         if sender.send(Message::Pong(payload)).await.is_err() {
                             break;
                         }
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        handle_client_text(&state, text.as_str(), &detail_tx).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
@@ -225,6 +243,16 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
+            detail = detail_rx.recv() => {
+                match detail {
+                    Some(message) => {
+                        if send_json(&mut sender, &message).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
             _ = stale_tick.tick() => {
                 let message = StreamMessage::Snapshot {
                     quotes: state.snapshot().await,
@@ -233,6 +261,42 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
                     break;
                 }
             }
+        }
+    }
+}
+
+async fn handle_client_text(state: &AppState, text: &str, detail_tx: &mpsc::Sender<StreamMessage>) {
+    match serde_json::from_str::<StreamRequest>(text) {
+        Ok(StreamRequest::DetailRequest { request_id, symbol }) => {
+            let state = state.clone();
+            let detail_tx = detail_tx.clone();
+            tokio::spawn(async move {
+                let message = match state.quote_detail(&symbol).await {
+                    Ok(detail) => StreamMessage::Detail {
+                        request_id,
+                        symbol: detail.symbol,
+                        quote: detail.quote,
+                        intraday: detail.intraday,
+                        server_ts: detail.server_ts,
+                        cached: detail.cached,
+                    },
+                    Err(err) => StreamMessage::DetailError {
+                        request_id,
+                        symbol,
+                        message: err.to_string(),
+                        server_ts: chrono::Utc::now(),
+                    },
+                };
+                let _ = detail_tx.send(message).await;
+            });
+        }
+        Err(err) => {
+            let _ = detail_tx
+                .send(StreamMessage::Error {
+                    message: format!("invalid client message: {err}"),
+                    server_ts: chrono::Utc::now(),
+                })
+                .await;
         }
     }
 }

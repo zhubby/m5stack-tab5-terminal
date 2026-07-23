@@ -1,5 +1,6 @@
 #include "network.hpp"
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -25,6 +26,9 @@ StockDashboard *s_dashboard = nullptr;
 int s_retry_count = 0;
 std::string s_backend_uri;
 std::string s_ws_message_buffer;
+esp_websocket_client_handle_t s_ws_client = nullptr;
+bool s_ws_connected = false;
+uint64_t s_next_detail_request_id = 1;
 
 void with_lvgl_lock(void (*fn)(StockDashboard *dashboard, void *ctx), void *ctx) {
     if (s_dashboard == nullptr) {
@@ -51,6 +55,12 @@ void apply_message(StockDashboard *dashboard, void *ctx) {
     }
     if (message->quote.has_value()) {
         dashboard->apply_quote(*message->quote);
+    }
+    if (message->detail.has_value()) {
+        dashboard->apply_detail(*message->detail);
+    }
+    if (message->detail_error.has_value()) {
+        dashboard->apply_detail_error(message->detail_error->symbol.c_str(), message->detail_error->message.c_str());
     }
     if (message->status.has_value()) {
         dashboard->set_connection_status(message->status->c_str());
@@ -83,9 +93,11 @@ void websocket_event_handler(void *, esp_event_base_t, int32_t event_id, void *e
     auto *data = static_cast<esp_websocket_event_data_t *>(event_data);
     switch (event_id) {
         case WEBSOCKET_EVENT_CONNECTED:
+            s_ws_connected = true;
             with_lvgl_lock(update_status, const_cast<char *>("backend connected"));
             break;
         case WEBSOCKET_EVENT_DISCONNECTED:
+            s_ws_connected = false;
             with_lvgl_lock(update_error, const_cast<char *>("backend offline"));
             break;
         case WEBSOCKET_EVENT_DATA: {
@@ -108,6 +120,7 @@ void websocket_event_handler(void *, esp_event_base_t, int32_t event_id, void *e
             break;
         }
         case WEBSOCKET_EVENT_ERROR:
+            s_ws_connected = false;
             with_lvgl_lock(update_error, const_cast<char *>("websocket error"));
             break;
         default:
@@ -177,12 +190,32 @@ void stock_network_start(StockDashboard *dashboard) {
     websocket_cfg.reconnect_timeout_ms = 5000;
     websocket_cfg.network_timeout_ms = 5000;
 
-    esp_websocket_client_handle_t client = esp_websocket_client_init(&websocket_cfg);
-    if (client == nullptr) {
+    s_ws_client = esp_websocket_client_init(&websocket_cfg);
+    if (s_ws_client == nullptr) {
         with_lvgl_lock(update_error, const_cast<char *>("websocket init failed"));
         return;
     }
 
-    ESP_ERROR_CHECK(esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, websocket_event_handler, nullptr));
-    ESP_ERROR_CHECK(esp_websocket_client_start(client));
+    ESP_ERROR_CHECK(esp_websocket_register_events(s_ws_client, WEBSOCKET_EVENT_ANY, websocket_event_handler, nullptr));
+    ESP_ERROR_CHECK(esp_websocket_client_start(s_ws_client));
+}
+
+bool stock_network_request_detail(const char *symbol) {
+    if (symbol == nullptr || symbol[0] == '\0' || s_ws_client == nullptr || !s_ws_connected) {
+        return false;
+    }
+
+    char payload[160];
+    const uint64_t request_id = s_next_detail_request_id++;
+    const int len = std::snprintf(
+        payload,
+        sizeof(payload),
+        "{\"type\":\"detail_request\",\"request_id\":%llu,\"symbol\":\"%s\"}",
+        static_cast<unsigned long long>(request_id),
+        symbol);
+    if (len <= 0 || len >= static_cast<int>(sizeof(payload))) {
+        return false;
+    }
+
+    return esp_websocket_client_send_text(s_ws_client, payload, len, pdMS_TO_TICKS(100)) >= 0;
 }

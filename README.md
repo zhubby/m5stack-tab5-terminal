@@ -27,6 +27,7 @@ GET http://localhost:8080/v1/watchlist
 GET http://localhost:8080/v1/admin/watchlist
 POST http://localhost:8080/v1/admin/watchlist
 DELETE http://localhost:8080/v1/admin/watchlist/<symbol>
+GET http://localhost:8080/v1/quotes/<symbol>/detail
 ```
 
 Admin API calls require `DEVICE_TOKEN`; add/delete operations update `WATCHLIST_FILE` and restart the active quote provider subscription.
@@ -93,9 +94,21 @@ The backend sends:
 
 ```json
 {"type":"snapshot","quotes":[]}
-{"type":"quote","quote":{"symbol":"600519.SH","name":"贵州茅台","market":"cn","last":1682.65,"change":9.2,"change_pct":0.55,"volume":2600000,"turnover":4374000000.0,"trade_status":"normal","status":"normal","quote_ts":"2026-07-23T09:30:03Z","server_ts":"2026-07-23T09:30:04Z","stale":false,"stale_after_ms":20000}}
+{"type":"quote","quote":{"symbol":"600519.SH","name":"贵州茅台","market":"cn","last":1682.65,"change":9.2,"change_pct":0.55,"open":1675.2,"high":1688.9,"low":1669.3,"prev_close":1673.45,"volume":2600000,"turnover":4374000000.0,"trade_status":"normal","status":"normal","quote_ts":"2026-07-23T09:30:03Z","server_ts":"2026-07-23T09:30:04Z","stale":false,"stale_after_ms":20000}}
 {"type":"status","status":"running","server_ts":"2026-07-23T00:00:00Z"}
 {"type":"error","message":"client lagged and skipped 12 updates","server_ts":"2026-07-23T00:00:00Z"}
+```
+
+Tab5 sends a detail request on card tap:
+
+```json
+{"type":"detail_request","request_id":1,"symbol":"600519.SH"}
+```
+
+The backend answers on the same WebSocket:
+
+```json
+{"type":"detail","request_id":1,"symbol":"600519.SH","quote":{},"intraday":[{"ts":"2026-07-23T09:30:00Z","price":1680.1,"avg_price":1680.1,"volume":3200,"turnover":5376320.0}],"server_ts":"2026-07-23T09:30:05Z","cached":false}
 ```
 
 The full quote DTO includes:
@@ -106,6 +119,10 @@ The full quote DTO includes:
 - `last`
 - `change`
 - `change_pct`
+- `open`
+- `high`
+- `low`
+- `prev_close`
 - `volume`
 - `turnover`
 - `trade_status`

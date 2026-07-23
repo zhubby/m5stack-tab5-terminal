@@ -6,12 +6,21 @@ use tokio::sync::{Mutex, RwLock, broadcast, watch};
 use crate::{
     config::{AppConfig, PersistedWatchItem, WatchItem, normalize_display_symbol},
     error::AppError,
-    models::{HealthResponse, Quote, StreamMessage, WatchlistItem},
+    models::{
+        HealthResponse, IntradayPoint, Quote, QuoteDetailResponse, StreamMessage, WatchlistItem,
+    },
 };
+
+#[derive(Debug)]
+struct IntradayCacheEntry {
+    fetched_at: DateTime<Utc>,
+    points: Vec<IntradayPoint>,
+}
 
 #[derive(Debug)]
 struct QuoteStore {
     quotes: BTreeMap<String, Quote>,
+    intraday_cache: BTreeMap<String, IntradayCacheEntry>,
     watchlist: Vec<WatchItem>,
     watchlist_revision: u64,
     provider_status: String,
@@ -39,6 +48,7 @@ impl AppState {
             config: Arc::new(config),
             store: Arc::new(RwLock::new(QuoteStore {
                 quotes: BTreeMap::new(),
+                intraday_cache: BTreeMap::new(),
                 watchlist,
                 watchlist_revision: 0,
                 provider_status: "starting".to_string(),
@@ -112,6 +122,7 @@ impl AppState {
     ) -> Result<Vec<WatchlistItem>, AppError> {
         let _guard = self.watchlist_mutation_lock.lock().await;
         let item = WatchItem::from_input(symbol.into(), name).map_err(AppError::Config)?;
+        let item_symbol = item.symbol.clone();
         let (changed, items) = {
             let store = self.store.read().await;
             let mut items = store.watchlist.clone();
@@ -141,6 +152,7 @@ impl AppState {
         let revision = {
             let mut store = self.store.write().await;
             store.watchlist = items.clone();
+            store.intraday_cache.remove(&item_symbol);
             store.watchlist_revision += 1;
             store.watchlist_revision
         };
@@ -168,6 +180,7 @@ impl AppState {
                 let mut store = self.store.write().await;
                 store.watchlist = items.clone();
                 store.quotes.remove(&symbol);
+                store.intraday_cache.remove(&symbol);
                 store.watchlist_revision += 1;
                 store.watchlist_revision
             };
@@ -190,6 +203,68 @@ impl AppState {
             .cloned()
             .map(|quote| quote.with_freshness(now, self.config.stale_after))
             .collect()
+    }
+
+    pub async fn quote_detail(&self, symbol: &str) -> Result<QuoteDetailResponse, AppError> {
+        let symbol = normalize_display_symbol(symbol).map_err(AppError::Config)?;
+        let now = Utc::now();
+        let (item, quote, cached_points) = {
+            let store = self.store.read().await;
+            let item = store
+                .watchlist
+                .iter()
+                .find(|item| item.symbol == symbol)
+                .cloned()
+                .ok_or_else(|| AppError::Config(format!("{symbol} is not in the watchlist")))?;
+            let quote = store
+                .quotes
+                .get(&symbol)
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::Config(format!("quote for {symbol} is not available yet"))
+                })?
+                .with_freshness(now, self.config.stale_after);
+            let cached_points = store
+                .intraday_cache
+                .get(&symbol)
+                .filter(|entry| {
+                    now.signed_duration_since(entry.fetched_at)
+                        .to_std()
+                        .is_ok_and(|age| age < self.config.detail_cache_ttl)
+                })
+                .map(|entry| entry.points.clone());
+            (item, quote, cached_points)
+        };
+
+        if let Some(intraday) = cached_points {
+            return Ok(QuoteDetailResponse {
+                symbol,
+                quote,
+                intraday,
+                server_ts: Utc::now(),
+                cached: true,
+            });
+        }
+
+        let intraday = crate::providers::fetch_intraday(self.config(), &item, &quote).await?;
+        {
+            let mut store = self.store.write().await;
+            store.intraday_cache.insert(
+                symbol.clone(),
+                IntradayCacheEntry {
+                    fetched_at: Utc::now(),
+                    points: intraday.clone(),
+                },
+            );
+        }
+
+        Ok(QuoteDetailResponse {
+            symbol,
+            quote,
+            intraday,
+            server_ts: Utc::now(),
+            cached: false,
+        })
     }
 
     pub async fn health(&self) -> HealthResponse {

@@ -21,9 +21,13 @@ const initialWatchlist: WatchlistItem[] = [
 const maotaiQuote: Quote = {
   change: 9.2,
   change_pct: 0.55,
+  high: 1688.9,
   last: 1682.65,
+  low: 1669.3,
   market: 'cn',
   name: '贵州茅台',
+  open: 1675.2,
+  prev_close: 1673.45,
   quote_ts: '2026-07-23T09:30:03Z',
   server_ts: '2026-07-23T09:30:04Z',
   stale: false,

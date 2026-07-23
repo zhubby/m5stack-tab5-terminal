@@ -44,6 +44,7 @@ pub struct AppConfig {
     pub watchlist_file: Option<PathBuf>,
     pub frontend_dist_dir: PathBuf,
     pub stale_after: Duration,
+    pub detail_cache_ttl: Duration,
     pub mock_interval: Duration,
     pub device_token: Option<String>,
 }
@@ -98,6 +99,7 @@ impl AppConfig {
             .as_str()
             .try_into()?;
         let stale_after = Duration::from_secs(read_u64_env("STALE_AFTER_SECS", 20)?);
+        let detail_cache_ttl = Duration::from_secs(read_u64_env("DETAIL_CACHE_TTL_SECS", 30)?);
         let mock_interval = Duration::from_millis(read_u64_env("MOCK_INTERVAL_MS", 3000)?);
         let watchlist_file = env::var("WATCHLIST_FILE")
             .map(|value| value.trim().to_string())
@@ -125,6 +127,7 @@ impl AppConfig {
             watchlist_file,
             frontend_dist_dir,
             stale_after,
+            detail_cache_ttl,
             mock_interval,
             device_token,
         })

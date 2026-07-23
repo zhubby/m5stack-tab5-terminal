@@ -14,6 +14,10 @@ export interface Quote {
   last: number
   change: number
   change_pct: number
+  open: number
+  high: number
+  low: number
+  prev_close: number
   volume: number
   turnover: number
   trade_status: string
@@ -22,6 +26,22 @@ export interface Quote {
   server_ts: string
   stale: boolean
   stale_after_ms: number
+}
+
+export interface IntradayPoint {
+  ts: string
+  price: number
+  avg_price: number
+  volume: number
+  turnover: number
+}
+
+export interface QuoteDetailResponse {
+  symbol: string
+  quote: Quote
+  intraday: IntradayPoint[]
+  server_ts: string
+  cached: boolean
 }
 
 export interface WatchlistItem {
@@ -53,3 +73,19 @@ export type StreamMessage =
   | { type: 'quote'; quote: Quote }
   | { type: 'status'; status: string; server_ts: string }
   | { type: 'error'; message: string; server_ts: string }
+  | {
+      type: 'detail'
+      request_id: number
+      symbol: string
+      quote: Quote
+      intraday: IntradayPoint[]
+      server_ts: string
+      cached: boolean
+    }
+  | {
+      type: 'detail_error'
+      request_id: number
+      symbol: string
+      message: string
+      server_ts: string
+    }

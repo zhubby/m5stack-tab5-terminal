@@ -20,13 +20,15 @@ The project uses managed components:
 
 ## Runtime modes
 
-If `CONFIG_TAB5_STOCK_WIFI_SSID` is empty, the device runs local mock quotes so the display, touch, scroll, color, and refresh behavior can be validated without a backend.
+If `CONFIG_TAB5_STOCK_WIFI_SSID` is empty, the device runs local mock quotes and synthetic intraday details so the display, touch, scroll, chart, color, and refresh behavior can be validated without a backend.
 
 When Wi-Fi and backend URI are configured in `idf.py menuconfig`, the firmware connects to:
 
 ```text
 ws://<backend-host>:8080/v1/quotes/stream
 ```
+
+The list cards are clickable. A tap opens the detail screen and sends a `detail_request` over the existing WebSocket; the backend responds with current quote fields plus intraday price, average price, volume, and turnover points.
 
 All LVGL calls are protected with `bsp_display_lock()` and `bsp_display_unlock()` as required by the Tab5 BSP.
 
