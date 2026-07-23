@@ -10,7 +10,7 @@ pub enum Market {
 
 impl Market {
     pub fn infer(symbol: &str) -> Self {
-        if symbol.ends_with(".HK") {
+        if symbol.to_ascii_uppercase().ends_with(".HK") {
             Self::Hk
         } else {
             Self::Cn
@@ -87,6 +87,18 @@ pub struct WatchlistItem {
     pub symbol: String,
     pub name: String,
     pub market: Market,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpsertWatchItemRequest {
+    pub symbol: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeleteWatchItemResponse {
+    pub deleted: bool,
+    pub items: Vec<WatchlistItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

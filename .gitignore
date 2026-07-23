@@ -2,9 +2,9 @@ target/
 .env
 .env.*
 !.env.example
+watchlist.json
 sdkconfig
 sdkconfig.old
 managed_components/
 build/
 .DS_Store
-

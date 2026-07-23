@@ -7,5 +7,8 @@ pub mod state;
 
 pub use app::{app, spawn_provider};
 pub use config::{AppConfig, QuoteProviderKind, WatchItem};
-pub use models::{HealthResponse, Market, Quote, QuoteStatus, StreamMessage, WatchlistResponse};
+pub use models::{
+    DeleteWatchItemResponse, HealthResponse, Market, Quote, QuoteStatus, StreamMessage,
+    UpsertWatchItemRequest, WatchlistResponse,
+};
 pub use state::AppState;

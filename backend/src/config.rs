@@ -1,4 +1,11 @@
-use std::{env, net::SocketAddr, time::Duration};
+use std::{
+    env, fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use serde::{Deserialize, Serialize};
 
 use crate::models::{Market, WatchlistItem};
 
@@ -33,7 +40,8 @@ impl TryFrom<&str> for QuoteProviderKind {
 pub struct AppConfig {
     pub bind_addr: SocketAddr,
     pub provider: QuoteProviderKind,
-    pub watchlist: Vec<WatchItem>,
+    pub initial_watchlist: Vec<WatchItem>,
+    pub watchlist_file: Option<PathBuf>,
     pub stale_after: Duration,
     pub mock_interval: Duration,
     pub device_token: Option<String>,
@@ -49,13 +57,22 @@ pub struct WatchItem {
 
 impl WatchItem {
     pub fn new(symbol: impl Into<String>, name: impl Into<String>, market: Market) -> Self {
-        let symbol = symbol.into();
+        let symbol = symbol.into().trim().to_ascii_uppercase();
         Self {
             provider_symbol: normalize_provider_symbol(&symbol),
             symbol,
             name: name.into(),
             market,
         }
+    }
+
+    pub fn from_input(symbol: impl Into<String>, name: Option<String>) -> Result<Self, String> {
+        let symbol = normalize_display_symbol(&symbol.into())?;
+        let name = name
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| symbol.clone());
+        Ok(Self::new(symbol.clone(), name, Market::infer(&symbol)))
     }
 }
 
@@ -81,7 +98,14 @@ impl AppConfig {
             .try_into()?;
         let stale_after = Duration::from_secs(read_u64_env("STALE_AFTER_SECS", 20)?);
         let mock_interval = Duration::from_millis(read_u64_env("MOCK_INTERVAL_MS", 3000)?);
-        let watchlist = parse_watchlist(&env::var("WATCHLIST").unwrap_or_default())?;
+        let watchlist_file = env::var("WATCHLIST_FILE")
+            .map(|value| value.trim().to_string())
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| Some(PathBuf::from("watchlist.json")));
+        let env_watchlist = parse_watchlist(&env::var("WATCHLIST").unwrap_or_default())?;
+        let watchlist = load_or_default_watchlist(watchlist_file.as_deref(), env_watchlist)?;
         let device_token = env::var("DEVICE_TOKEN")
             .ok()
             .map(|token| token.trim().to_string())
@@ -90,11 +114,8 @@ impl AppConfig {
         Ok(Self {
             bind_addr,
             provider,
-            watchlist: if watchlist.is_empty() {
-                default_watchlist()
-            } else {
-                watchlist
-            },
+            initial_watchlist: watchlist,
+            watchlist_file,
             stale_after,
             mock_interval,
             device_token,
@@ -132,9 +153,69 @@ pub fn parse_watchlist(value: &str) -> Result<Vec<WatchItem>, String> {
                 .filter(|part| !part.is_empty())
                 .unwrap_or(symbol);
 
-            Ok(WatchItem::new(symbol, name, Market::infer(symbol)))
+            WatchItem::from_input(symbol, Some(name.to_string()))
         })
         .collect()
+}
+
+fn load_or_default_watchlist(
+    watchlist_file: Option<&Path>,
+    env_watchlist: Vec<WatchItem>,
+) -> Result<Vec<WatchItem>, String> {
+    if let Some(path) = watchlist_file
+        && let Some(items) = load_watchlist_file(path)?
+    {
+        return Ok(items);
+    }
+
+    if env_watchlist.is_empty() {
+        Ok(default_watchlist())
+    } else {
+        Ok(env_watchlist)
+    }
+}
+
+fn load_watchlist_file(path: &Path) -> Result<Option<Vec<WatchItem>>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let data = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let items = serde_json::from_str::<Vec<PersistedWatchItem>>(&data)
+        .map_err(|err| format!("failed to parse {}: {err}", path.display()))?
+        .into_iter()
+        .map(|item| WatchItem::from_input(item.symbol, Some(item.name)))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(items))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PersistedWatchItem {
+    pub symbol: String,
+    pub name: String,
+}
+
+impl From<&WatchItem> for PersistedWatchItem {
+    fn from(item: &WatchItem) -> Self {
+        Self {
+            symbol: item.symbol.clone(),
+            name: item.name.clone(),
+        }
+    }
+}
+
+pub fn normalize_display_symbol(symbol: &str) -> Result<String, String> {
+    let symbol = symbol.trim().to_ascii_uppercase();
+    if symbol.is_empty() {
+        return Err("symbol is required".to_string());
+    }
+    if !symbol.contains('.') {
+        return Err(
+            "symbol must include market suffix, for example 600519.SH or 00700.HK".to_string(),
+        );
+    }
+    Ok(symbol)
 }
 
 fn normalize_provider_symbol(symbol: &str) -> String {
@@ -166,10 +247,15 @@ pub fn default_watchlist() -> Vec<WatchItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        env, fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn parses_watchlist_symbols_and_names() {
-        let parsed = parse_watchlist("600519.SH:贵州茅台,00700.HK:腾讯控股").unwrap();
+        let parsed = parse_watchlist("600519.sh:贵州茅台,00700.hk:腾讯控股").unwrap();
 
         assert_eq!(parsed[0].symbol, "600519.SH");
         assert_eq!(parsed[0].name, "贵州茅台");
@@ -183,5 +269,47 @@ mod tests {
 
         assert_eq!(parsed[0].symbol, "00700.HK");
         assert_eq!(parsed[0].provider_symbol, "700.HK");
+    }
+
+    #[test]
+    fn normalizes_persisted_watchlist_symbols() {
+        let path = temp_watchlist_path("normalized");
+        fs::write(&path, r#"[{"symbol":"00700.hk","name":"腾讯控股"}]"#).unwrap();
+
+        let resolved = load_or_default_watchlist(Some(path.as_path()), Vec::new()).unwrap();
+
+        fs::remove_file(path).unwrap();
+        assert_eq!(resolved[0].symbol, "00700.HK");
+        assert_eq!(resolved[0].provider_symbol, "700.HK");
+        assert_eq!(resolved[0].market, Market::Hk);
+    }
+
+    #[test]
+    fn persisted_empty_watchlist_stays_empty() {
+        let path = temp_watchlist_path("empty");
+        fs::write(&path, "[]").unwrap();
+
+        let resolved = load_or_default_watchlist(Some(path.as_path()), Vec::new()).unwrap();
+
+        fs::remove_file(path).unwrap();
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn missing_watchlist_file_falls_back_to_defaults() {
+        let path = temp_watchlist_path("missing");
+        let _ = fs::remove_file(&path);
+
+        let resolved = load_or_default_watchlist(Some(path.as_path()), Vec::new()).unwrap();
+
+        assert_eq!(resolved, default_watchlist());
+    }
+
+    fn temp_watchlist_path(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!("tab5-stock-{label}-{unique}.json"))
     }
 }

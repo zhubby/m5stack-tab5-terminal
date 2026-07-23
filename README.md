@@ -20,10 +20,16 @@ cargo run -p tab5-stock-backend
 Default mode is mock quotes bound to `127.0.0.1:8080`. Useful endpoints:
 
 ```text
+GET http://localhost:8080/
 WS  ws://localhost:8080/v1/quotes/stream
 GET http://localhost:8080/v1/health
 GET http://localhost:8080/v1/watchlist
+GET http://localhost:8080/v1/admin/watchlist
+POST http://localhost:8080/v1/admin/watchlist
+DELETE http://localhost:8080/v1/admin/watchlist/<symbol>
 ```
+
+Open `http://localhost:8080/` to manage the watchlist from a browser. Admin API calls require `DEVICE_TOKEN`; add/delete operations update `WATCHLIST_FILE` and restart the active quote provider subscription.
 
 Use Longbridge by setting:
 
@@ -35,7 +41,7 @@ LONGBRIDGE_ACCESS_TOKEN=...
 LONGBRIDGE_LANGUAGE=zh-CN
 ```
 
-If you bind the backend to `0.0.0.0` for LAN access, set `DEVICE_TOKEN` and pass it as a bearer token or WebSocket query parameter:
+Set `DEVICE_TOKEN` for browser/admin watchlist management. Also set it before binding the backend to `0.0.0.0` for LAN access, then pass it as a bearer token or WebSocket query parameter:
 
 ```text
 BIND_ADDR=0.0.0.0:8080

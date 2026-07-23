@@ -1,12 +1,12 @@
 use axum::{
     Json, Router,
     extract::{
-        Query, State,
+        Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
-    routing::get,
+    http::{HeaderMap, header},
+    response::{Html, IntoResponse},
+    routing::{delete, get},
 };
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use serde::Deserialize;
@@ -16,15 +16,28 @@ use tracing::{error, info};
 
 use crate::{
     config::QuoteProviderKind,
-    models::{StreamMessage, WatchlistResponse},
+    error::AppError,
+    models::{DeleteWatchItemResponse, StreamMessage, UpsertWatchItemRequest, WatchlistResponse},
     providers::{QuoteProvider, longbridge::LongbridgeQuoteProvider, mock::MockQuoteProvider},
     state::AppState,
 };
 
+const ADMIN_HTML: &str = include_str!("admin.html");
+
 pub fn app(state: AppState) -> Router {
     Router::new()
+        .route("/", get(admin_page))
+        .route("/admin", get(admin_page))
         .route("/v1/health", get(health))
         .route("/v1/watchlist", get(watchlist))
+        .route(
+            "/v1/admin/watchlist",
+            get(admin_watchlist).post(admin_upsert_watch_item),
+        )
+        .route(
+            "/v1/admin/watchlist/{symbol}",
+            delete(admin_delete_watch_item),
+        )
         .route("/v1/quotes/stream", get(quotes_stream))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
@@ -34,17 +47,16 @@ pub fn app(state: AppState) -> Router {
 pub fn spawn_provider(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut shutdown = state.shutdown_rx();
+        let mut watchlist_revision = state.watchlist_revision_rx();
 
         loop {
+            let watchlist = state.watchlist().await;
             let provider: Box<dyn QuoteProvider> = match state.config().provider {
-                QuoteProviderKind::Mock => {
-                    Box::new(MockQuoteProvider::new(state.config().watchlist.clone()))
-                }
-                QuoteProviderKind::Longbridge => Box::new(LongbridgeQuoteProvider::new(
-                    state.config().watchlist.clone(),
-                )),
+                QuoteProviderKind::Mock => Box::new(MockQuoteProvider::new(watchlist)),
+                QuoteProviderKind::Longbridge => Box::new(LongbridgeQuoteProvider::new(watchlist)),
             };
 
+            let mut restart_for_watchlist = false;
             tokio::select! {
                 result = provider.run(state.clone()) => {
                     if let Err(err) = result {
@@ -57,21 +69,36 @@ pub fn spawn_provider(state: AppState) -> tokio::task::JoinHandle<()> {
                         return;
                     }
                 }
+                changed = watchlist_revision.changed() => {
+                    if changed.is_ok() {
+                        restart_for_watchlist = true;
+                    }
+                }
             }
 
-            if *shutdown.borrow() || state.config().provider == QuoteProviderKind::Mock {
+            if *shutdown.borrow() {
                 return;
             }
 
-            sleep(Duration::from_secs(5)).await;
+            if state.config().provider == QuoteProviderKind::Mock && !restart_for_watchlist {
+                return;
+            }
+
+            if !restart_for_watchlist {
+                sleep(Duration::from_secs(5)).await;
+            }
         }
     })
+}
+
+async fn admin_page() -> Html<&'static str> {
+    Html(ADMIN_HTML)
 }
 
 async fn health(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<crate::models::HealthResponse>, AuthError> {
+) -> Result<Json<crate::models::HealthResponse>, AppError> {
     authorize(&state, &headers, None)?;
     Ok(Json(state.health().await))
 }
@@ -79,11 +106,39 @@ async fn health(
 async fn watchlist(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<WatchlistResponse>, AuthError> {
+) -> Result<Json<WatchlistResponse>, AppError> {
     authorize(&state, &headers, None)?;
-    Ok(Json(WatchlistResponse {
-        items: state.config().watchlist.iter().map(Into::into).collect(),
-    }))
+    Ok(Json(watchlist_response(&state).await))
+}
+
+async fn admin_watchlist(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<WatchlistResponse>, AppError> {
+    authorize_admin(&state, &headers)?;
+    Ok(Json(watchlist_response(&state).await))
+}
+
+async fn admin_upsert_watch_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UpsertWatchItemRequest>,
+) -> Result<Json<WatchlistResponse>, AppError> {
+    authorize_admin(&state, &headers)?;
+    let items = state
+        .upsert_watch_item(request.symbol, request.name)
+        .await?;
+    Ok(Json(WatchlistResponse { items }))
+}
+
+async fn admin_delete_watch_item(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(symbol): Path<String>,
+) -> Result<Json<DeleteWatchItemResponse>, AppError> {
+    authorize_admin(&state, &headers)?;
+    let (deleted, items) = state.delete_watch_item(&symbol).await?;
+    Ok(Json(DeleteWatchItemResponse { deleted, items }))
 }
 
 async fn quotes_stream(
@@ -91,7 +146,7 @@ async fn quotes_stream(
     headers: HeaderMap,
     Query(auth): Query<AuthQuery>,
     ws: WebSocketUpgrade,
-) -> Result<impl IntoResponse, AuthError> {
+) -> Result<impl IntoResponse, AppError> {
     authorize(&state, &headers, auth.token.as_deref())?;
     Ok(ws.on_upgrade(move |socket| handle_socket(state, socket)))
 }
@@ -186,20 +241,11 @@ struct AuthQuery {
     token: Option<String>,
 }
 
-#[derive(Debug)]
-struct AuthError;
-
-impl IntoResponse for AuthError {
-    fn into_response(self) -> axum::response::Response {
-        StatusCode::UNAUTHORIZED.into_response()
-    }
-}
-
 fn authorize(
     state: &AppState,
     headers: &HeaderMap,
     query_token: Option<&str>,
-) -> Result<(), AuthError> {
+) -> Result<(), AppError> {
     let Some(expected) = state.config().device_token.as_deref() else {
         return Ok(());
     };
@@ -212,6 +258,29 @@ fn authorize(
     if bearer == Some(expected) || query_token == Some(expected) {
         Ok(())
     } else {
-        Err(AuthError)
+        Err(AppError::Unauthorized)
+    }
+}
+
+fn authorize_admin(state: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
+    let Some(expected) = state.config().device_token.as_deref() else {
+        return Err(AppError::Unauthorized);
+    };
+
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+
+    if bearer == Some(expected) {
+        Ok(())
+    } else {
+        Err(AppError::Unauthorized)
+    }
+}
+
+async fn watchlist_response(state: &AppState) -> WatchlistResponse {
+    WatchlistResponse {
+        items: state.watchlist_response_items().await,
     }
 }

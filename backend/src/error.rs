@@ -10,6 +10,8 @@ use thiserror::Error;
 pub enum AppError {
     #[error("configuration error: {0}")]
     Config(String),
+    #[error("unauthorized")]
+    Unauthorized,
     #[error("quote provider error: {0}")]
     Provider(String),
     #[error("internal error: {0}")]
@@ -31,6 +33,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match self {
             AppError::Config(_) => StatusCode::BAD_REQUEST,
+            AppError::Unauthorized => return StatusCode::UNAUTHORIZED.into_response(),
             AppError::Provider(_) => StatusCode::BAD_GATEWAY,
             AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
